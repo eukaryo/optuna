@@ -228,6 +228,7 @@ class Study:
         self,
         deepcopy: bool = True,
         states: Optional[Container[TrialState]] = None,
+        *,
         use_cache: bool = False,
     ) -> List[FrozenTrial]:
         """Return all trials in the study.
@@ -268,7 +269,13 @@ class Study:
         Returns:
             A list of :class:`~optuna.trial.FrozenTrial` objects.
         """
-        if use_cache and self._thread_local.cached_all_trials is not None:
+        if use_cache:
+            if not self._thread_local.in_optimize_loop:
+                warnings.warn("use_cache option is supposed to be called inside the optimize loop.")
+
+            if self._thread_local.cached_all_trials is None:
+                self._thread_local.cached_all_trials = self._storage.get_all_trials(self._study_id, deepcopy=False)
+
             filtered_trials = [t for t in self._thread_local.cached_all_trials if t.state in states]
             return copy.deepcopy(filtered_trials) if deepcopy else filtered_trials
 

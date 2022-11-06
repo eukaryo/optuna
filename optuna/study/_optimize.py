@@ -188,8 +188,6 @@ def _run_trial(
         optuna.storages.fail_stale_trials(study)
 
     trial = study.ask()
-    study._thread_local.cached_all_trials = study.get_trials(deepcopy=False)
-
     state: Optional[TrialState] = None
     value_or_values: Optional[Union[float, Sequence[float]]] = None
     func_err: Optional[Union[Exception, KeyboardInterrupt]] = None
