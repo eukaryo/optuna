@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     # Not intended for forks.
-    if: github.repository == 'optuna/optuna'
+    if: github.repository == 'eukaryo/optuna'
     if:  |
       (
          contains(github.event.pull_request.labels.*.name, 'safe-to-run-visual-regression-tests') ||
