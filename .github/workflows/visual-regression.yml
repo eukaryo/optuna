@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     if: |
-      ( github.repository == 'optuna/optuna' ) &&
+      ( github.repository == 'eukaryo/optuna' ) &&
       (
          contains(github.event.pull_request.labels.*.name, 'safe-to-run-visual-regression-tests') ||
          ( github.event_name == 'workflow_dispatch' )
@@ -35,7 +35,7 @@ jobs:
         pip install --progress-bar off .
     - name: Install Optuna visual regression
       run: |
-        git clone https://github.com/optuna/optuna-visualization-regression-tests.git
+        git clone -b add-timeline-plot https://github.com/eukaryo/optuna-visualization-regression-tests.git
         pip install -r optuna-visualization-regression-tests/requirements.txt
     - name: Build
       run: |
