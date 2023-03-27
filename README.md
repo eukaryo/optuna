@@ -22,7 +22,7 @@ Optuna can dynamically construct the search spaces for the hyperparameters.
 
 ## Key Features
 
-Optuna has modern functionalities as follows:
+Optuna has modern functionalities as follows: 
 
 - [Lightweight, versatile, and platform agnostic architecture](https://optuna.readthedocs.io/en/stable/tutorial/10_key_features/001_first.html)
   - Handle a wide variety of tasks with a simple installation that has few requirements.
