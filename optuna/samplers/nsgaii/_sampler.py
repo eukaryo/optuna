@@ -9,6 +9,7 @@ from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Sequence
+from typing import Set
 from typing import Tuple
 import warnings
 
@@ -488,52 +489,229 @@ def _constrained_dominates(
     return violation0 < violation1
 
 
+class _BIT_set_union:
+    def __init__(self, input: List[int]) -> None:
+        self.bit: List[Set[int]] = [set() for _ in range(len(input))]
+        for idx, ranking in enumerate(input):
+            self.add(idx, ranking)
+
+    def add(self, value: int, position: int) -> None:
+        assert 0 <= value and value < len(self.bit)
+        assert 0 <= position and position < len(self.bit)
+        x = position
+        while x < len(self.bit):
+            self.bit[x].add(value)
+            x |= x + 1
+
+    def get(self, position: int) -> Any:
+        assert 0 <= position and position <= len(self.bit)
+        result = set()
+        x = position - 1
+        while x >= 0:
+            result |= self.bit[x]
+            x = (x & (x + 1)) - 1
+        return result
+
+
+def _group_by_score(score_and_trials: List[Tuple[int, FrozenTrial]]) -> List[List[FrozenTrial]]:
+    if len(score_and_trials) == 0:
+        return []
+    population_groups = [[score_and_trials[0][1]]]
+    for i in range(1, len(score_and_trials)):
+        if score_and_trials[i][0] == score_and_trials[i - 1][0]:
+            population_groups[-1].append(score_and_trials[i][1])
+        else:
+            population_groups.append([score_and_trials[i][1]])
+    return population_groups
+
+
 def _fast_non_dominated_sort(
     population: List[FrozenTrial],
     directions: List[optuna.study.StudyDirection],
     constraints_func: Optional[Callable[[FrozenTrial], Sequence[float]]] = None,
 ) -> List[List[FrozenTrial]]:
     if constraints_func is not None:
-        for _trial in population:
-            _constraints = _trial.system_attrs.get(_CONSTRAINTS_KEY)
-            if _constraints is None:
+        for i in range(len(population)):
+            _trial = population[i]
+            _constraints_i = _trial.system_attrs.get(_CONSTRAINTS_KEY)
+            if _constraints_i is None:
+                warnings.warn(
+                    f"Trial {_trial.number} does not have constraint values."
+                    " It will be dominated by the other trials."
+                )
                 continue
-            if np.any(np.isnan(np.array(_constraints))):
+            if np.any(np.isnan(np.array(_constraints_i))):
                 raise ValueError("NaN is not acceptable as constraint value.")
+            for j in range(i + 1, len(population)):
+                _constraints_j = population[j].system_attrs.get(_CONSTRAINTS_KEY)
+                if _constraints_j is None:
+                    continue
+                if len(_constraints_i) != len(_constraints_j):
+                    raise ValueError(
+                        "Trials with different numbers of constraints cannot be compared."
+                    )
 
-    dominated_count: DefaultDict[int, int] = defaultdict(int)
-    dominates_list = defaultdict(list)
+    else:
+        return _fast_non_dominated_sort_without_constraint(population, directions)
 
-    dominates = _dominates if constraints_func is None else _constrained_dominates
-
-    for p, q in itertools.combinations(population, 2):
-        if dominates(p, q, directions):
-            dominates_list[p.number].append(q.number)
-            dominated_count[q.number] += 1
-        elif dominates(q, p, directions):
-            dominates_list[q.number].append(p.number)
-            dominated_count[p.number] += 1
-
-    population_per_rank = []
-    while population:
-        non_dominated_population = []
-        i = 0
-        while i < len(population):
-            if dominated_count[population[i].number] == 0:
-                individual = population[i]
-                if i == len(population) - 1:
-                    population.pop()
-                else:
-                    population[i] = population.pop()
-                non_dominated_population.append(individual)
+    feasible_trials = []
+    infeasible_trials = []
+    incomplete_trials = []
+    have_no_constraint_trials = []
+    for _trial in population:
+        constraints = _trial.system_attrs.get(_CONSTRAINTS_KEY)
+        if constraints is None:
+            have_no_constraint_trials.append(_trial)
+        elif _trial.state != TrialState.COMPLETE:
+            incomplete_trials.append(_trial)
+        else:
+            violations = sum(v for v in constraints if v > 0)  # type: ignore
+            if violations == 0:
+                feasible_trials.append(_trial)
             else:
-                i += 1
+                infeasible_trials.append((violations, _trial))
 
-        for x in non_dominated_population:
-            for y in dominates_list[x.number]:
-                dominated_count[y] -= 1
+    feasible_population_per_rank = []
+    infeasible_population_per_rank = []
+    have_no_constraint_trials_per_rank = []
+    if len(feasible_trials) != 0:
+        feasible_population_per_rank = _fast_non_dominated_sort_without_constraint(
+            feasible_trials, directions
+        )
+    if len(infeasible_trials) != 0:
+        infeasible_trials.sort()
+        infeasible_population_per_rank = _group_by_score(infeasible_trials)
+    if len(incomplete_trials) != 0:
+        incomplete_trials = [incomplete_trials]  # type: ignore
+    if len(have_no_constraint_trials) != 0:
+        have_no_constraint_trials_per_rank = _fast_non_dominated_sort_without_constraint(
+            have_no_constraint_trials, directions
+        )
 
-        assert non_dominated_population
-        population_per_rank.append(non_dominated_population)
+    return (
+        feasible_population_per_rank
+        + infeasible_population_per_rank
+        + incomplete_trials  # type: ignore
+        + have_no_constraint_trials_per_rank
+    )
 
-    return population_per_rank
+
+def _compress_values_to_ranks(
+    population: List[FrozenTrial], directions: List[optuna.study.StudyDirection]
+) -> List[List[int]]:
+    result = []
+    for d in range(len(directions)):
+        value_dict = {
+            x: i
+            for i, x in enumerate(
+                sorted(
+                    list(set([_trial.values[d] for _trial in population])),
+                    reverse=directions[d] is StudyDirection.MAXIMIZE,
+                )
+            )
+        }
+        result.append([value_dict[_trial.values[d]] for _trial in population])
+    return result
+
+
+def _count_identicals(
+    ranks: List[List[int]]
+) -> Tuple[DefaultDict[Tuple[int], Set[int]], List[List[Set[int]]]]:
+    result: DefaultDict[Tuple[int], Set[int]] = defaultdict(lambda: set())
+    results: List[List[Set[int]]] = [
+        [set() for _ in range(len(ranks[0]))] for _ in range(len(ranks))
+    ]
+    for i in range(len(ranks[0])):
+        result[tuple([ranks[d][i] for d in range(len(ranks))])].add(i)  # type: ignore
+        for d in range(len(ranks)):
+            results[d][ranks[d][i]].add(i)
+    return result, results
+
+
+def _fast_non_dominated_sort_without_constraint(
+    population: List[FrozenTrial], directions: List[optuna.study.StudyDirection]
+) -> List[List[FrozenTrial]]:
+
+    if len(population) == 0:
+        return []
+
+    complete_trials = []
+    incomplete_trials = []
+    for _trial in population:
+        if len(_trial.values) != len(directions):
+            raise ValueError(
+                "The number of the values and the number of the objectives are mismatched."
+            )
+        if _trial.state == TrialState.COMPLETE:
+            complete_trials.append(_trial)
+        else:
+            incomplete_trials.append(_trial)
+
+    if len(complete_trials) == 0:
+        return [incomplete_trials]  # type: ignore
+
+    if len(incomplete_trials) > 0:
+        incomplete_trials = [incomplete_trials]  # type: ignore
+
+    if len(directions) == 1:
+        return _group_by_score(
+            sorted(
+                [(_trial.values[0], _trial) for _trial in complete_trials],
+                reverse=directions[0] is StudyDirection.MAXIMIZE,
+            )
+            + incomplete_trials
+        )
+
+    population_groups = _fast_non_dominated_sort_without_constraint_complete(
+        complete_trials, directions
+    )
+
+    return population_groups + incomplete_trials  # type: ignore
+
+
+def _fast_non_dominated_sort_without_constraint_complete(
+    population: List[FrozenTrial], directions: List[optuna.study.StudyDirection]
+) -> List[List[FrozenTrial]]:
+
+    ranks = _compress_values_to_ranks(population, directions)
+    identical_count, same_rank_idx = _count_identicals(ranks)
+    binary_indexed_trees = [_BIT_set_union(ranks[d]) for d in range(len(directions))]
+    dominated_count = [0 for _ in range(len(population))]
+    domination_set = []
+
+    population_groups: List[List[FrozenTrial]] = [[]]
+    frontier_idx = []
+    population_count = 0
+    for i in range(len(population)):
+        better_idx = binary_indexed_trees[0].get(ranks[0][i])
+        dominated_set = better_idx | same_rank_idx[0][ranks[0][i]]
+        domination_set.append(better_idx)
+        for d in range(1, len(directions)):
+            better_idx = binary_indexed_trees[d].get(ranks[d][i])
+            dominated_set &= better_idx | same_rank_idx[d][ranks[d][i]]
+            domination_set[i] |= better_idx
+        domination_set[i] = set(range(len(population))) - domination_set[i]
+        identity = tuple([ranks[d][i] for d in range(len(directions))])
+        dominated_count[i] = len(dominated_set) - len(identical_count[identity])  # type: ignore
+        assert 0 <= dominated_count[i]
+        if dominated_count[i] == 0:
+            population_groups[0].append(population[i])
+            frontier_idx.append(i)
+            population_count += 1
+        for j in identical_count[identity]:  # type: ignore
+            assert j in domination_set[i]
+            domination_set[i].remove(j)
+
+    while population_count < len(population):
+        population_groups.append([])
+        new_frontier_idx = []
+        for i in frontier_idx:
+            for j in domination_set[i]:
+                dominated_count[j] -= 1
+                if dominated_count[j] == 0:
+                    population_groups[-1].append(population[j])
+                    new_frontier_idx.append(j)
+                    population_count += 1
+        frontier_idx = new_frontier_idx
+
+    return population_groups
