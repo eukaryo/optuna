@@ -716,6 +716,42 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
             trial_intermediate_value.intermediate_value = stored_value
             trial_intermediate_value.intermediate_value_type = value_type
 
+    def set_trial_intermediate_values_multi(
+        self, trial_id: int, step: int, intermediate_values: Sequence[float]
+    ) -> None:
+        with _create_scoped_session(self.scoped_session, True) as session:
+            self._set_trial_intermediate_values_multi_without_commit(
+                session, trial_id, step, intermediate_values
+            )
+
+    def _set_trial_intermediate_values_multi_without_commit(
+        self,
+        session: "sqlalchemy_orm.Session",
+        trial_id: int,
+        step: int,
+        intermediate_values: Sequence[float],
+    ) -> None:
+        trial = models.TrialModel.find_or_raise_by_id(trial_id, session)
+        self.check_trial_is_updatable(trial_id, trial.state)
+
+        stored_value = models.TrialIntermediateValuesForMultiobjectiveModel.intermediate_values_to_stored_repr(
+            intermediate_values
+        )
+        trial_intermediate_values = (
+            models.TrialIntermediateValuesForMultiobjectiveModel.find_by_trial_and_step(
+                trial, step, session
+            )
+        )
+        if trial_intermediate_values is None:
+            trial_intermediate_values = models.TrialIntermediateValuesForMultiobjectiveModel(
+                trial_id=trial_id,
+                step=step,
+                intermediate_values=stored_value,
+            )
+            session.add(trial_intermediate_values)
+        else:
+            trial_intermediate_values.intermediate_values = stored_value
+
     def set_trial_user_attr(self, trial_id: int, key: str, value: Any) -> None:
         with _create_scoped_session(self.scoped_session, True) as session:
             self._set_trial_user_attr_without_commit(session, trial_id, key, value)
@@ -823,6 +859,9 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
                     .options(sqlalchemy_orm.selectinload(models.TrialModel.user_attributes))
                     .options(sqlalchemy_orm.selectinload(models.TrialModel.system_attributes))
                     .options(sqlalchemy_orm.selectinload(models.TrialModel.intermediate_values))
+                    .options(
+                        sqlalchemy_orm.selectinload(models.TrialModel.intermediate_values_multi)
+                    )
                     .filter(
                         models.TrialModel.trial_id.in_(trial_ids),
                         models.TrialModel.study_id == study_id,
@@ -848,6 +887,9 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
                     .options(sqlalchemy_orm.selectinload(models.TrialModel.user_attributes))
                     .options(sqlalchemy_orm.selectinload(models.TrialModel.system_attributes))
                     .options(sqlalchemy_orm.selectinload(models.TrialModel.intermediate_values))
+                    .options(
+                        sqlalchemy_orm.selectinload(models.TrialModel.intermediate_values_multi)
+                    )
                     .filter(models.TrialModel.study_id == study_id)
                     .order_by(models.TrialModel.trial_id)
                     .all()
@@ -897,6 +939,12 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
                     v.intermediate_value, v.intermediate_value_type
                 )
                 for v in trial.intermediate_values
+            },
+            intermediate_values_multi={
+                v.step: models.TrialIntermediateValuesForMultiobjectiveModel.stored_repr_to_intermediate_values(
+                    v.intermediate_values
+                )
+                for v in trial.intermediate_values_multi
             },
             trial_id=trial.trial_id,
         )
