@@ -152,6 +152,7 @@ class FrozenTrial(BaseTrial):
         trial_id: int,
         *,
         values: Optional[Sequence[float]] = None,
+        intermediate_values_multi: Optional[Dict[int, Sequence[float]]] = None,
     ) -> None:
         self._number = number
         self.state = state
@@ -170,6 +171,7 @@ class FrozenTrial(BaseTrial):
         self.intermediate_values = intermediate_values
         self._distributions = distributions
         self._trial_id = trial_id
+        self.intermediate_values_multi = intermediate_values_multi or {}
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, FrozenTrial):
@@ -485,6 +487,7 @@ def create_trial(
     user_attrs: Optional[Dict[str, Any]] = None,
     system_attrs: Optional[Dict[str, Any]] = None,
     intermediate_values: Optional[Dict[int, float]] = None,
+    intermediate_values_multi: Optional[Dict[int, Sequence[float]]] = None,
 ) -> FrozenTrial:
     """Create a new :class:`~optuna.trial.FrozenTrial`.
 
@@ -562,6 +565,7 @@ def create_trial(
     user_attrs = user_attrs or {}
     system_attrs = system_attrs or {}
     intermediate_values = intermediate_values or {}
+    intermediate_values_multi = intermediate_values_multi or {}
 
     if state == TrialState.WAITING:
         datetime_start = None
@@ -586,6 +590,7 @@ def create_trial(
         user_attrs=user_attrs,
         system_attrs=system_attrs,
         intermediate_values=intermediate_values,
+        intermediate_values_multi=intermediate_values_multi,
     )
 
     trial._validate()
