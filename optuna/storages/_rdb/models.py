@@ -3,6 +3,7 @@ import math
 from typing import Any
 from typing import List
 from typing import Optional
+from typing import Sequence
 from typing import Tuple
 
 from sqlalchemy import asc
@@ -542,6 +543,51 @@ class TrialIntermediateValueModel(BaseModel):
     def where_trial_id(
         cls, trial_id: int, session: orm.Session
     ) -> List["TrialIntermediateValueModel"]:
+        trial_intermediate_values = session.query(cls).filter(cls.trial_id == trial_id).all()
+
+        return trial_intermediate_values
+
+
+class TrialIntermediateValuesForMultiobjectiveModel(BaseModel):
+    __tablename__ = "trial_intermediate_values_multi"
+    __table_args__: Any = (UniqueConstraint("trial_id", "step"),)
+    trial_intermediate_values_id = _Column(Integer, primary_key=True)
+    trial_id = _Column(Integer, ForeignKey("trials.trial_id"), nullable=False)
+    step = _Column(Integer, nullable=False)
+    intermediate_values = _Column(Text(), nullable=True)
+
+    trial = orm.relationship(
+        TrialModel, backref=orm.backref("intermediate_values_multi", cascade="all, delete-orphan")
+    )
+
+    @classmethod
+    def intermediate_values_to_stored_repr(
+        cls,
+        values: Sequence[float],
+    ) -> str:
+        return ",".join([str(x) for x in values])
+
+    @classmethod
+    def stored_repr_to_intermediate_values(cls, values: str) -> Sequence[float]:
+        return [float(x) for x in values.split(",")]
+
+    @classmethod
+    def find_by_trial_and_step(
+        cls, trial: TrialModel, step: int, session: orm.Session
+    ) -> Optional["TrialIntermediateValuesForMultiobjectiveModel"]:
+        trial_intermediate_values = (
+            session.query(cls)
+            .filter(cls.trial_id == trial.trial_id)
+            .filter(cls.step == step)
+            .one_or_none()
+        )
+
+        return trial_intermediate_values
+
+    @classmethod
+    def where_trial_id(
+        cls, trial_id: int, session: orm.Session
+    ) -> List["TrialIntermediateValuesForMultiobjectiveModel"]:
         trial_intermediate_values = session.query(cls).filter(cls.trial_id == trial_id).all()
 
         return trial_intermediate_values
