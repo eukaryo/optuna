@@ -317,6 +317,18 @@ class InMemoryStorage(BaseStorage):
             trial.intermediate_values[step] = intermediate_value
             self._set_trial(trial_id, trial)
 
+    def set_trial_intermediate_values_multi(
+        self, trial_id: int, step: int, intermediate_values: Sequence[float]
+    ) -> None:
+        with self._lock:
+            trial = self._get_trial(trial_id)
+            self.check_trial_is_updatable(trial_id, trial.state)
+
+            trial = copy.copy(trial)
+            trial.intermediate_values_multi = copy.copy(trial.intermediate_values_multi)
+            trial.intermediate_values_multi[step] = intermediate_values
+            self._set_trial(trial_id, trial)
+
     def set_trial_user_attr(self, trial_id: int, key: str, value: Any) -> None:
         with self._lock:
             self._check_trial_id(trial_id)
