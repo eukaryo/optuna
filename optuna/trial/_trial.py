@@ -479,7 +479,8 @@ class Trial(BaseTrial):
 
         if len(self.study.directions) > 1:
             raise NotImplementedError(
-                "Trial.report is not supported for multi-objective optimization."
+                "Trial.report is only supported for single-objective optimization."
+                "For multi-objective optimization, use Trial.report_multi_objective."
             )
 
         try:
@@ -505,6 +506,39 @@ class Trial(BaseTrial):
 
         self.storage.set_trial_intermediate_value(self._trial_id, step, value)
         self._cached_frozen_trial.intermediate_values[step] = value
+
+    def report_multi_objective(self, values: Sequence[float], step: int) -> None:
+        if len(self.study.directions) == 1:
+            raise NotImplementedError(
+                "Trial.report_multi_objective is supported only for multi-objective optimization."
+                "For single-objective optimization, use Trial.report."
+            )
+        elif len(self.study.directions) != len(values):
+            raise ValueError("The len(values) is different from study.directions.")
+
+        try:
+            # For convenience, we allow users to report values that can be cast to `float`.
+            values = [float(x) for x in values]
+        except (TypeError, ValueError):
+            message = "The `values` argument is a list of type '{}' but supposed to be a Sequence[float].".format(
+                str([type(x).__name__ for x in values])
+            )
+            raise TypeError(message) from None
+
+        if step < 0:
+            raise ValueError("The `step` argument is {} but cannot be negative.".format(step))
+
+        if step in self._cached_frozen_trial.intermediate_values:
+            # Do nothing if already reported.
+            warnings.warn(
+                "The reported value is ignored because this `step` {} is already reported.".format(
+                    step
+                )
+            )
+            return
+
+        self.storage.set_trial_intermediate_values_multi(self._trial_id, step, values)
+        self._cached_frozen_trial.intermediate_values_multi[step] = values
 
     def should_prune(self) -> bool:
         """Suggest whether the trial should be pruned or not.
