@@ -57,7 +57,7 @@ def _get_percentile_intermediate_results_over_trials_multi(
     return result
 
 
-def _is_first_in_interval_step(
+def _is_first_in_interval_step_multi(
     step: int, intermediate_steps: KeysView[int], n_warmup_steps: int, interval_steps: int
 ) -> bool:
     nearest_lower_pruning_step = (
@@ -195,8 +195,8 @@ class MultiObjectivePercentilePruner(BasePruner):
         if step < n_warmup_steps:
             return False
 
-        if not _is_first_in_interval_step(
-            step, trial.intermediate_values.keys(), n_warmup_steps, self._interval_steps
+        if not _is_first_in_interval_step_multi(
+            step, trial.intermediate_values_multi.keys(), n_warmup_steps, self._interval_steps
         ):
             return False
 
