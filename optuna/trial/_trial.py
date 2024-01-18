@@ -564,9 +564,44 @@ class Trial(BaseTrial):
             configured pruning algorithm. Otherwise, the trial should continue.
         """
 
+        # (takizawa) This check can be moved into pruner.prune method.
         if len(self.study.directions) > 1:
             raise NotImplementedError(
                 "Trial.should_prune is not supported for multi-objective optimization."
+                "Use Trial.should_prune_multi instead."
+            )
+
+        trial = self._get_latest_trial()
+        return self.study.pruner.prune(self.study, trial)
+
+    def should_prune_multi(self) -> bool:
+        """Suggest whether the trial should be pruned or not.
+
+        The suggestion is made by a pruning algorithm associated with the trial and is based on
+        previously reported values. The algorithm can be specified when constructing a
+        :class:`~optuna.study.Study`.
+
+        .. note::
+            If no values have been reported, the algorithm cannot make meaningful suggestions.
+            Similarly, if this method is called multiple times with the exact same set of reported
+            values, the suggestions will be the same.
+
+        .. seealso::
+            Please refer to the example code in :func:`optuna.trial.Trial.report`.
+
+        .. note::
+            :func:`~optuna.trial.Trial.should_prune_multi` does not support single-objective
+            optimization.
+
+        Returns:
+            A boolean value. If :obj:`True`, the trial should be pruned according to the
+            configured pruning algorithm. Otherwise, the trial should continue.
+        """
+
+        # (takizawa) This check can be moved into pruner.prune method.
+        if len(self.study.directions) == 1:
+            raise NotImplementedError(
+                "Trial.should_prune_multi is not supported for single-objective optimization."
             )
 
         trial = self._get_latest_trial()
