@@ -464,6 +464,19 @@ class FrozenTrial(BaseTrial):
             return max(self.intermediate_values.keys())
 
     @property
+    def last_step_multi(self) -> Optional[int]:
+        """Return the maximum step of :attr:`intermediate_values_multi` in the trial.
+
+        Returns:
+            The maximum step of intermediates.
+        """
+
+        if len(self.intermediate_values_multi) == 0:
+            return None
+        else:
+            return max(self.intermediate_values_multi.keys())
+
+    @property
     def duration(self) -> Optional[datetime.timedelta]:
         """Return the elapsed time taken to complete the trial.
 
