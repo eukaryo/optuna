@@ -45,7 +45,6 @@ dynamic = ["version"]
 [project.optional-dependencies]
 benchmark = [
   "asv>=0.5.0",
-  "botorch",
   "cma",
   "virtualenv"
 ]
@@ -91,7 +90,6 @@ optional = [
   "scikit-learn>=0.24.2",
   # optuna/visualization/param_importances.py.
   "scipy",  # optuna/samplers/_gp
-  "torch",  # optuna/samplers/_gp
 ]
 test = [
   "coverage",
@@ -100,7 +98,6 @@ test = [
   "moto",
   "pytest",
   "scipy>=1.9.2; python_version>='3.8'",
-  "torch",
 ]
 
 [project.urls]
