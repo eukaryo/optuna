@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import math
 from typing import cast
 from typing import TYPE_CHECKING
 import warnings
@@ -17,6 +18,7 @@ from optuna.trial import TrialState
 
 
 if TYPE_CHECKING:
+    import scipy.stats as scipy_stats
     import torch
 
     import optuna._gp.acqf as acqf
@@ -31,6 +33,7 @@ else:
     gp = _LazyImport("optuna._gp.gp")
     acqf = _LazyImport("optuna._gp.acqf")
     prior = _LazyImport("optuna._gp.prior")
+    scipy_stats = _LazyImport("scipy.stats")
 
 
 @experimental_class("4.0.0")
@@ -71,13 +74,15 @@ class Terminator2(BaseTerminator):
             import logging
             import sys
 
-            from sklearn.datasets import load_wine
-            from sklearn.ensemble import RandomForestClassifier
-            from sklearn.model_selection import cross_val_score
-            from sklearn.model_selection import KFold
-
             import optuna
-            from optuna.terminator import Terminator2
+            from optuna.terminator.terminator2 import Terminator2
+
+
+            def rosenbrock(x):
+                y = 0
+                for d in range(len(x) - 1):
+                    y += 100 * (x[d + 1] - x[d] ** 2) ** 2 + (x[d] - 1) ** 2
+                return y
 
 
             study = optuna.create_study(direction="maximize")
@@ -87,23 +92,16 @@ class Terminator2(BaseTerminator):
             while True:
                 trial = study.ask()
 
-                X, y = load_wine(return_X_y=True)
+                x = [trial.suggest_float(f"x{i}", -2.0, 2.0) for i in range(5)]
 
-                clf = RandomForestClassifier(
-                    max_depth=trial.suggest_int("max_depth", 2, 32),
-                    min_samples_split=trial.suggest_float("min_samples_split", 0, 1),
-                    criterion=trial.suggest_categorical("criterion", ("gini", "entropy")),
-                )
-
-                scores = cross_val_score(clf, X, y, cv=KFold(n_splits=5, shuffle=True))
-
-                value = scores.mean()
+                value = rosenbrock(x)
                 logging.info(f"Trial #{trial.number} finished with value {value}.")
                 study.tell(trial, value)
 
-                if trial.number > min_n_trials and terminator2.should_terminate(study):
+                if trial.number > min_n_trials and terminator.should_terminate(study):
                     logging.info("Terminated by Optuna Terminator2!")
                     break
+
 
     .. seealso::
         Please refer to :class:`~optuna.terminator.TerminatorCallback` for how to use
@@ -116,6 +114,7 @@ class Terminator2(BaseTerminator):
         min_n_trials: int = 20,
         threshold_ratio_to_initial_median: float = 0.01,
         deterministic_objective: bool = False,
+        delta: float = 0.1,
     ) -> None:
         if min_n_trials <= 1 or not np.isfinite(min_n_trials):
             raise ValueError("`min_n_trials` is expected to be an integer more than two.")
@@ -128,6 +127,7 @@ class Terminator2(BaseTerminator):
         self._threshold_ratio_to_initial_median = threshold_ratio_to_initial_median
         self._deterministic = deterministic_objective
         self._median_threshold = None
+        self._delta = delta
 
     def _raise_error_if_multi_objective(self, study: Study) -> None:
         if study._is_multi_objective():
@@ -136,16 +136,82 @@ class Terminator2(BaseTerminator):
                 f"{self.__class__.__name__} cannot be used."
             )
 
+    @staticmethod
+    def _compute_gp_covariance_matern52(squared_distance: float) -> float:
+        sqrt5d = math.sqrt(5 * squared_distance)
+        exp_part = math.exp(-sqrt5d)
+        val = exp_part * ((5 / 3) * squared_distance + sqrt5d + 1)
+        return val
+
     def _compute_gp_posterior(
         self,
-        direction: StudyDirection,
-        trials: list[FrozenTrial],
         search_space: dict[str, BaseDistribution],
-    ) -> tuple[float, float]:
+        internal_search_space: gp_search_space.SearchSpace,
+        normalized_params: np.ndarray,
+        standarized_score_vals: np.ndarray,
+        star_flag: bool = False,
+    ) -> tuple[float, float, float]:  # mean, var, kernel_noise_var(lambda)
 
+        kernel_params = gp.fit_kernel_params(
+            X=normalized_params[..., :-1, :],
+            Y=standarized_score_vals if star_flag else standarized_score_vals[:-1],
+            is_categorical=(
+                internal_search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
+            ),
+            log_prior=prior.default_log_prior,
+            minimum_noise=prior.DEFAULT_MINIMUM_NOISE_VAR,
+            initial_kernel_params=None,
+            deterministic_objective=self._deterministic,
+        )
+        acqf_params = acqf.create_acqf_params(
+            acqf_type=acqf.AcquisitionFunctionType.LOG_EI,
+            kernel_params=kernel_params,
+            search_space=internal_search_space,
+            X=normalized_params[..., :-1, :],
+            Y=standarized_score_vals if star_flag else standarized_score_vals[:-1],
+        )
+        mean, var = gp.posterior(
+            acqf_params.kernel_params,
+            torch.from_numpy(acqf_params.X),
+            torch.from_numpy(
+                acqf_params.search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
+            ),
+            torch.from_numpy(acqf_params.cov_Y_Y_inv),
+            torch.from_numpy(acqf_params.cov_Y_Y_inv_Y),
+            torch.from_numpy(normalized_params[-1, :]),
+        )
+        mean = mean.detach().numpy().flatten()
+        var = var.detach().numpy().flatten()
+        epsilon = kernel_params.noise_var.detach().numpy().flatten()
+        assert len(mean) == 1 and len(var) == 1 and len(epsilon) == 1
+        assert 0.0 < epsilon
+        return float(mean[0]), float(var[0]), float(1.0 / epsilon[0])
+
+    @staticmethod
+    def compute_ucb(mean: float, var: float, beta: float) -> float:
+        return mean + torch.sqrt(beta * var)
+
+    @staticmethod
+    def compute__lcb(mean: float, var: float, beta: float) -> float:
+        return mean - torch.sqrt(beta * var)
+
+    def compute_criterion(self, trials: list[FrozenTrial], study: Study) -> float:
+
+        def _gpsampler_infer_relative_search_space() -> dict[str, BaseDistribution]:
+            search_space = {}
+            for name, distribution in (
+                optuna.search_space.IntersectionSearchSpace().calculate(study).items()
+            ):
+                if distribution.single():
+                    continue
+                search_space[name] = distribution
+
+            return search_space
+
+        search_space = _gpsampler_infer_relative_search_space()
         (
             internal_search_space,
-            normalized_params,
+            normalized_params,  # shape:[len(trials), len(params)]
         ) = gp_search_space.get_search_space_and_normalized_params(trials, search_space)
 
         _sign = -1.0 if direction == StudyDirection.MINIMIZE else 1.0
@@ -164,66 +230,101 @@ class Terminator2(BaseTerminator):
             score_vals = np.clip(score_vals, worst_finite_score, best_finite_score)
 
         standarized_score_vals = (score_vals - score_vals.mean()) / max(1e-10, score_vals.std())
-
-        kernel_params = gp.fit_kernel_params(
-            X=normalized_params[..., :-1, :],
-            Y=standarized_score_vals[:-1],
-            is_categorical=(
-                internal_search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
-            ),
-            log_prior=prior.default_log_prior,
-            minimum_noise=prior.DEFAULT_MINIMUM_NOISE_VAR,
-            initial_kernel_params=None,
-            deterministic_objective=self._deterministic,
+        theta_t_star = min(standarized_score_vals)
+        theta_t1_star = min(standarized_score_vals[:-1])
+        covariance_theta_t_star_theta_t1_star = _compute_gp_covariance_matern52(
+            float(np.linalg.norm(theta_t_star - theta_t1_star)) ** 2
         )
-        acqf_params = acqf.create_acqf_params(
-            acqf_type=acqf.AcquisitionFunctionType.LOG_EI,
-            kernel_params=kernel_params,
-            search_space=internal_search_space,
-            X=normalized_params[..., :-1, :],
-            Y=standarized_score_vals[:-1],
+
+        mu_t1_theta_t, sigma_t1_theta_t, _lambda = self._compute_gp_posterior(
+            search_space,
+            internal_search_space,
+            normalized_params,
+            standarized_score_vals,
         )
-        mean, var = gp.posterior(
-            acqf_params.kernel_params,
-            torch.from_numpy(acqf_params.X),
-            torch.from_numpy(
-                acqf_params.search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
-            ),
-            torch.from_numpy(acqf_params.cov_Y_Y_inv),
-            torch.from_numpy(acqf_params.cov_Y_Y_inv_Y),
-            torch.from_numpy(normalized_params[-1, :]),
+        mu_t2_theta_t1, sigma_t2_theta_t1, _ = self._compute_gp_posterior(
+            search_space,
+            internal_search_space,
+            normalized_params[:-1],
+            standarized_score_vals[:-1],
         )
-        assert np.prod(mean.detach().numpy().shape) == 1
-        assert np.prod(var.detach().numpy().shape) == 1
-        return float(mean.detach().numpy().flatten()[0]), float(var.detach().numpy().flatten()[0])
-
-    def compute_criterion(self, trials: list[FrozenTrial], study: Study) -> float:
-
-        def _gpsampler_infer_relative_search_space() -> dict[str, BaseDistribution]:
-            search_space = {}
-            for name, distribution in (
-                optuna.search_space.IntersectionSearchSpace().calculate(study).items()
-            ):
-                if distribution.single():
-                    continue
-                search_space[name] = distribution
-
-            return search_space
-
-        search_space = _gpsampler_infer_relative_search_space()
-
-        mu_t1_theta_t, sigma_t1_theta_t = self._compute_gp_posterior(
-            study.direction, trials, search_space
+        mu_t1_theta_t_star, sigma_t1_theta_t_star, _ = self._compute_gp_posterior(
+            search_space,
+            internal_search_space,
+            normalized_params[:-1],
+            standarized_score_vals[:-1] + [theta_t_star],
+            star_flag=True,
         )
-        mu_t2_theta_t1, sigma_t2_theta_t1 = self._compute_gp_posterior(
-            study.direction, trials[:-1], search_space
+        mu_t2_theta_t1_star, _, _ = self._compute_gp_posterior(
+            search_space,
+            internal_search_space,
+            normalized_params[:-2],
+            standarized_score_vals[:-2] + [theta_t1_star],
+            star_flag=True,
+        )
+        mu_t_theta_t_star, sigma_t_theta_t_star, _ = self._compute_gp_posterior(
+            search_space,
+            internal_search_space,
+            normalized_params,
+            standarized_score_vals + [theta_t_star],
+            star_flag=True,
+        )
+        mu_t1_theta_t1_star, _, _ = self._compute_gp_posterior(
+            search_space,
+            internal_search_space,
+            normalized_params[:-1],
+            standarized_score_vals[:-1] + [theta_t1_star],
+            star_flag=True,
         )
         sigma_t1_theta_t_squared = sigma_t1_theta_t**2
         sigma_t2_theta_t1_squared = sigma_t2_theta_t1**2
 
+        sigma_t1_theta_t_star_squared = sigma_t1_theta_t_star**2
+        sigma_t_theta_t_star_squared = sigma_t_theta_t_star**2
 
-        assert False  # TODO
-        return 0.0
+        y_t = standarized_score_vals[-1]
+        parameter_dimension = normalized_params.shape[-1]
+        beta = 2 * np.log(parameter_dimension * X.shape[0] ** 2 * np.pi**2 / (6 * self._delta))
+        kappa_t1 = compute_ucb(mu_t2_theta_t1, sigma_t2_theta_t1_squared, beta) - compute_lcb(
+            mu_t2_theta_t1, sigma_t2_theta_t1_squared, beta
+        )
+
+        theorem1_delta_mu_t_star = mu_t2_theta_t1_star - mu_t1_theta_t_star
+
+        alg1_delta_r_tilde_t_term1 = theorem1_delta_mu_t_star
+
+        theorem1_v = math.sqrt(
+            max(
+                1e-6,
+                sigma_t_theta_t_star_squared
+                - 2.0 * covariance_theta_t_star_theta_t1_star
+                + sigma_t1_theta_t_star_squared,
+            )
+        )
+        theorem1_g = (mu_t_theta_t_star - mu_t1_theta_t1_star) / theorem1_v
+
+        alg1_delta_r_tilde_t_term2 = theorem1_v * scipy_stats.norm.pdf(theorem1_g)
+        alg1_delta_r_tilde_t_term3 = theorem1_v * theorem1_g * scipy_stats.norm.cdf(theorem1_g)
+
+        eq4_rhs_term1 = 0.5 * math.log(1.0 + _lambda * sigma_t1_theta_t_squared)
+        eq4_rhs_term2 = 0.5 * sigma_t1_theta_t_squared / (sigma_t1_theta_t_squared + _lambda**-1)
+        eq4_rhs_term3 = (
+            0.5
+            * sigma_t1_theta_t_squared
+            * (y_t - mu_t1_theta_t) ** 2
+            / (sigma_t1_theta_t_squared + _lambda**-1) ** 2
+        )
+
+        alg1_delta_r_tilde_t_term4 = kappa_t1 * math.sqrt(
+            0.5 * (eq4_rhs_term1 + eq4_rhs_term2 + eq4_rhs_term3)
+        )
+
+        return (
+            alg1_delta_r_tilde_t_term1
+            + alg1_delta_r_tilde_t_term2
+            + alg1_delta_r_tilde_t_term3
+            + alg1_delta_r_tilde_t_term4
+        )
 
     def should_terminate(self, study: Study) -> bool:
         """Judge whether the study should be terminated based on the values."""
