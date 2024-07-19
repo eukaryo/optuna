@@ -143,32 +143,98 @@ class Terminator2(BaseTerminator):
         val = exp_part * ((5 / 3) * squared_distance + sqrt5d + 1)
         return val
 
-    def _compute_gp_posterior(
+
+
+    def _compute_gp_posterior_cov_two_thetas(
         self,
         search_space: dict[str, BaseDistribution],
         internal_search_space: gp_search_space.SearchSpace,
         normalized_params: np.ndarray,
         standarized_score_vals: np.ndarray,
-        star_flag: bool = False,
-    ) -> tuple[float, float, float]:  # mean, var, kernel_noise_var(lambda)
+        kernel_params: KernelParamsTensor,
+        theta1_index: int,
+        theta2_index: int,
+    ) -> float:  # cov
 
-        kernel_params = gp.fit_kernel_params(
-            X=normalized_params[..., :-1, :],
-            Y=standarized_score_vals if star_flag else standarized_score_vals[:-1],
-            is_categorical=(
-                internal_search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
-            ),
-            log_prior=prior.default_log_prior,
-            minimum_noise=prior.DEFAULT_MINIMUM_NOISE_VAR,
-            initial_kernel_params=None,
-            deterministic_objective=self._deterministic,
-        )
+        if theta1_index == theta2_index:
+            return self._compute_gp_posterior(
+                search_space,
+                internal_search_space,
+                normalized_params,
+                standarized_score_vals,
+                normalized_params[theta1_index],
+                kernel_params
+            )[1]
+
+        assert normalized_params.shape[0] == standarized_score_vals.shape[0]
+
+        # kernel_params = gp.fit_kernel_params(
+        #     X=normalized_params,
+        #     Y=standarized_score_vals,
+        #     is_categorical=(
+        #         internal_search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
+        #     ),
+        #     log_prior=prior.default_log_prior,
+        #     minimum_noise=prior.DEFAULT_MINIMUM_NOISE_VAR,
+        #     initial_kernel_params=None,
+        #     deterministic_objective=self._deterministic,
+        # )
         acqf_params = acqf.create_acqf_params(
             acqf_type=acqf.AcquisitionFunctionType.LOG_EI,
             kernel_params=kernel_params,
             search_space=internal_search_space,
-            X=normalized_params[..., :-1, :],
-            Y=standarized_score_vals if star_flag else standarized_score_vals[:-1],
+            X=normalized_params,
+            Y=standarized_score_vals,
+        )
+
+        _, var = _posterior(
+            acqf_params.kernel_params,
+            torch.from_numpy(acqf_params.X),
+            torch.from_numpy(
+                acqf_params.search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
+            ),
+            torch.from_numpy(acqf_params.cov_Y_Y_inv),
+            torch.from_numpy(acqf_params.cov_Y_Y_inv_Y),
+            torch.from_numpy(normalized_params[[theta1_index,theta2_index]]),
+        )
+        assert var.shape == (2,2)
+        var = var.detach().numpy()[0, 1]
+        return float(var[0])
+
+    def _compute_gp_posterior(
+        self,
+        search_space: dict[str, BaseDistribution],
+        internal_search_space: gp_search_space.SearchSpace,
+        X: np.ndarray,
+        Y: np.ndarray,
+        x_params: np.ndarray,
+        kernel_params: KernelParamsTensor,
+    ) -> tuple[float, float]:  # mean, var
+
+        
+        # if star_flag:
+        #     best_params: np.ndarray | None = normalized_params[..., -1, :]
+        #     normalized_params = normalized_params[..., :-1, :]
+        # else:
+        #     best_params = None
+
+        # kernel_params = gp.fit_kernel_params(
+        #     X=normalized_params[..., :-1, :],
+        #     Y=standarized_score_vals[:-1],
+        #     is_categorical=(
+        #         internal_search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
+        #     ),
+        #     log_prior=prior.default_log_prior,
+        #     minimum_noise=prior.DEFAULT_MINIMUM_NOISE_VAR,
+        #     initial_kernel_params=None,
+        #     deterministic_objective=self._deterministic,
+        # )
+        acqf_params = acqf.create_acqf_params(
+            acqf_type=acqf.AcquisitionFunctionType.LOG_EI,
+            kernel_params=kernel_params,
+            search_space=internal_search_space,
+            X=X,#normalized_params[..., :-1, :],
+            Y=Y,#standarized_score_vals[:-1],
         )
         mean, var = gp.posterior(
             acqf_params.kernel_params,
@@ -178,14 +244,12 @@ class Terminator2(BaseTerminator):
             ),
             torch.from_numpy(acqf_params.cov_Y_Y_inv),
             torch.from_numpy(acqf_params.cov_Y_Y_inv_Y),
-            torch.from_numpy(normalized_params[-1, :]),
+            torch.from_numpy(x_params),#best_params or normalized_params[..., -1, :]),
         )
         mean = mean.detach().numpy().flatten()
         var = var.detach().numpy().flatten()
-        epsilon = kernel_params.noise_var.detach().numpy().flatten()
-        assert len(mean) == 1 and len(var) == 1 and len(epsilon) == 1
-        assert 0.0 < epsilon
-        return float(mean[0]), float(var[0]), float(1.0 / epsilon[0])
+        assert len(mean) == 1 and len(var) == 1
+        return float(mean[0]), float(var[0])
 
     @staticmethod
     def compute_ucb(mean: float, var: float, beta: float) -> float:
@@ -201,6 +265,7 @@ class Terminator2(BaseTerminator):
             search_space = {}
             for name, distribution in (
                 optuna.search_space.IntersectionSearchSpace().calculate(study).items()
+                #IntersectionSearchSpaceは全trialで共通して出現する軸を得るためのもの。
             ):
                 if distribution.single():
                     continue
@@ -209,12 +274,21 @@ class Terminator2(BaseTerminator):
             return search_space
 
         search_space = _gpsampler_infer_relative_search_space()
+        if search_space == {}:
+            return 1.7976931348623157e+308  # floatの最大値。本当はsysから取るほうが安全
+
+        len_trials = len(trials)
+        len_params = len(search_space)
+
         (
             internal_search_space,
             normalized_params,  # shape:[len(trials), len(params)]
         ) = gp_search_space.get_search_space_and_normalized_params(trials, search_space)
 
-        _sign = -1.0 if direction == StudyDirection.MINIMIZE else 1.0
+        assert normalized_params.shape == (len_trials, len_params)
+        
+
+        _sign = -1.0 if study.direction == StudyDirection.MINIMIZE else 1.0
         score_vals = np.array([_sign * cast(float, trial.value) for trial in trials])
 
         if np.any(~np.isfinite(score_vals)):
@@ -229,71 +303,131 @@ class Terminator2(BaseTerminator):
 
             score_vals = np.clip(score_vals, worst_finite_score, best_finite_score)
 
-        standarized_score_vals = (score_vals - score_vals.mean()) / max(1e-10, score_vals.std())
-        theta_t_star = min(standarized_score_vals)
-        theta_t1_star = min(standarized_score_vals[:-1])
-        covariance_theta_t_star_theta_t1_star = _compute_gp_covariance_matern52(
-            float(np.linalg.norm(theta_t_star - theta_t1_star)) ** 2
+        standarized_score_vals = (score_vals - score_vals.mean()) / max(1e-6, score_vals.std())
+
+        assert len(standarized_score_vals) == len(normalized_params)
+
+        _lambda = prior.DEFAULT_MINIMUM_NOISE_VAR
+
+        kernel_params_t2 = gp.fit_kernel_params(  #t-2番目までの観測でkernelをfitする
+            X=normalized_params[..., :-2, :],
+            Y=standarized_score_vals[:-2],
+            is_categorical=(
+                internal_search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
+            ),
+            log_prior=prior.default_log_prior,
+            minimum_noise=prior.DEFAULT_MINIMUM_NOISE_VAR,
+            initial_kernel_params=None,
+            deterministic_objective=self._deterministic,
         )
 
-        mu_t1_theta_t, sigma_t1_theta_t, _lambda = self._compute_gp_posterior(
+        kernel_params_t1 = gp.fit_kernel_params(  #t-1番目までの観測でkernelをfitする
+            X=normalized_params[..., :-1, :],
+            Y=standarized_score_vals[:-1],
+            is_categorical=(
+                internal_search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
+            ),
+            log_prior=prior.default_log_prior,
+            minimum_noise=prior.DEFAULT_MINIMUM_NOISE_VAR,
+            initial_kernel_params=kernel_params_t2,
+            deterministic_objective=self._deterministic,
+        )
+
+        kernel_params_t = gp.fit_kernel_params(  #t番目までの観測でkernelをfitする
+            X=normalized_params,
+            Y=standarized_score_vals,
+            is_categorical=(
+                internal_search_space.scale_types == gp_search_space.ScaleType.CATEGORICAL
+            ),
+            log_prior=prior.default_log_prior,
+            minimum_noise=prior.DEFAULT_MINIMUM_NOISE_VAR,
+            initial_kernel_params=kernel_params_t1,
+            deterministic_objective=self._deterministic,
+        )
+
+        theta_t_star_index = np.argmin(standarized_score_vals)
+        theta_t1_star_index = np.argmin(standarized_score_vals[:-1])
+        theta_t_star = normalized_params[theta_t_star_index,:]
+        theta_t1_star = normalized_params[theta_t1_star_index,:]
+        covariance_theta_t_star_theta_t1_star = self._compute_gp_posterior_cov_two_thetas(
             search_space,
             internal_search_space,
             normalized_params,
             standarized_score_vals,
+            kernel_params_t,
+            theta_t_star_index,
+            theta_t1_star_index,
         )
-        mu_t2_theta_t1, sigma_t2_theta_t1, _ = self._compute_gp_posterior(
+
+        mu_t1_theta_t, sigma_t1_theta_t = self._compute_gp_posterior(
             search_space,
             internal_search_space,
-            normalized_params[:-1],
+            normalized_params[:-1, :],
             standarized_score_vals[:-1],
+            normalized_params[-1,:],
+            kernel_params_t1,
         )
-        mu_t1_theta_t_star, sigma_t1_theta_t_star, _ = self._compute_gp_posterior(
+        mu_t2_theta_t1, sigma_t2_theta_t1 = self._compute_gp_posterior(
             search_space,
             internal_search_space,
-            normalized_params[:-1],
-            standarized_score_vals[:-1] + [theta_t_star],
-            star_flag=True,
+            normalized_params[:-2, :],
+            standarized_score_vals[:-2],
+            normalized_params[-2,:],
+            kernel_params_t2,
         )
-        mu_t2_theta_t1_star, _, _ = self._compute_gp_posterior(
+        mu_t1_theta_t_star, sigma_t1_theta_t_star = self._compute_gp_posterior(
             search_space,
             internal_search_space,
-            normalized_params[:-2],
-            standarized_score_vals[:-2] + [theta_t1_star],
-            star_flag=True,
+            normalized_params[:-1, :],
+            standarized_score_vals[:-1],
+            theta_t_star,
+
+            kernel_params_t1
         )
-        mu_t_theta_t_star, sigma_t_theta_t_star, _ = self._compute_gp_posterior(
+        mu_t2_theta_t1_star, _ = self._compute_gp_posterior(
+            search_space,
+            internal_search_space,
+            normalized_params[:-1, :],
+            standarized_score_vals[:-1],
+            theta_t_star,
+            kernel_params_t1  # あえてt2ではなくt1を使う！　著者実装の工夫で、t1とt2がほぼ変わらないという仮定の下で常にt1を用いる。
+        )
+        mu_t_theta_t_star, sigma_t_theta_t_star = self._compute_gp_posterior(
             search_space,
             internal_search_space,
             normalized_params,
-            standarized_score_vals + [theta_t_star],
-            star_flag=True,
+            standarized_score_vals,
+            theta_t_star,
+            kernel_params_t
         )
-        mu_t1_theta_t1_star, _, _ = self._compute_gp_posterior(
+        mu_t1_theta_t1_star, sigma_t1_theta_t1_star = self._compute_gp_posterior(
             search_space,
             internal_search_space,
-            normalized_params[:-1],
-            standarized_score_vals[:-1] + [theta_t1_star],
-            star_flag=True,
+            normalized_params[:-1, :],
+            standarized_score_vals[:-1],
+            theta_t1_star,
+            kernel_params_t1
         )
         sigma_t1_theta_t_squared = sigma_t1_theta_t**2
         sigma_t2_theta_t1_squared = sigma_t2_theta_t1**2
 
         sigma_t1_theta_t_star_squared = sigma_t1_theta_t_star**2
         sigma_t_theta_t_star_squared = sigma_t_theta_t_star**2
+        sigma_t1_theta_t1_star_squared = sigma_t1_theta_t1_star**2
 
         y_t = standarized_score_vals[-1]
         parameter_dimension = normalized_params.shape[-1]
         beta = 2 * np.log(parameter_dimension * X.shape[0] ** 2 * np.pi**2 / (6 * self._delta))
-        kappa_t1 = compute_ucb(mu_t2_theta_t1, sigma_t2_theta_t1_squared, beta) - compute_lcb(
-            mu_t2_theta_t1, sigma_t2_theta_t1_squared, beta
-        )
+        kappa_t1 = self.compute_ucb(
+            mu_t1_theta_t1_star, sigma_t1_theta_t1_star_squared, beta
+        ) - self.compute_lcb(mu_t1_theta_t1_star, sigma_t1_theta_t1_star_squared, beta)
 
         theorem1_delta_mu_t_star = mu_t2_theta_t1_star - mu_t1_theta_t_star
 
         alg1_delta_r_tilde_t_term1 = theorem1_delta_mu_t_star
 
-        theorem1_v = math.sqrt(
+        exit()
+        theorem1_v = math.sqrt(###################ここが違う！covarianceとかつかう
             max(
                 1e-6,
                 sigma_t_theta_t_star_squared
@@ -348,3 +482,44 @@ class Terminator2(BaseTerminator):
         print(f"{current_criterion=} , {self._median_threshold=}")
 
         return self._median_threshold >= current_criterion
+
+def _posterior(
+    kernel_params: KernelParamsTensor,
+    X: torch.Tensor,  # [len(trials), len(params)]
+    is_categorical: torch.Tensor,  # bool[len(params)]
+    cov_Y_Y_inv: torch.Tensor,  # [len(trials), len(trials)]
+    cov_Y_Y_inv_Y: torch.Tensor,  # [len(trials)]
+    theta: torch.Tensor,  # [batch, len(params)]
+) -> tuple[torch.Tensor, torch.Tensor]:  # (mean: [(batch,)], var: [(batch,batch)])
+
+    assert len(X.shape) == 2
+    len_trials , len_params = X.shape
+    assert len(theta.shape) == 2
+    len_batch = theta.shape[0]
+    assert len_batch == 2
+    assert theta.shape == (len_batch, len_params)
+    assert is_categorical.shape == (len_params,)
+    assert cov_Y_Y_inv.shape == (len_trials, len_trials)
+    assert cov_Y_Y_inv_Y.shape == (len_trials,)
+
+
+    cov_ftheta_fX = gp.kernel(is_categorical, kernel_params, theta[..., None, :], X)[..., 0, :]#[batch,len(trials)]
+    assert cov_ftheta_fX.shape == (len_batch,len_trials)
+    cov_ftheta_ftheta = gp.kernel(is_categorical, kernel_params, theta[(0,), None, :], theta[(-1,), None, :])[..., 0, :]#[batch,batch]
+    assert cov_ftheta_ftheta.shape == (len_batch,len_batch)
+
+    # mean = cov_fx_fX @ inv(cov_fX_fX + noise * I) @ Y
+    # var = cov_fx_fx - cov_fx_fX @ inv(cov_fX_fX + noise * I) @ cov_fx_fX.T
+    mean = cov_ftheta_fX @ cov_Y_Y_inv_Y  # [batch]
+    assert mean.shape == (len_batch,)
+    var = cov_ftheta_ftheta - cov_ftheta_fX @ cov_Y_Y_inv @ cov_ftheta_fX.T  # [(batch, batch)]
+    assert var.shape == (len_batch, len_batch)
+    var = torch.clamp(var, min=0.0)
+
+    mean = mean.detach().numpy()
+    var = var.detach().numpy()
+    assert len(mean) == 1 and len(var) == 2
+    return mean, var
+
+    # We need to clamp the variance to avoid negative values due to numerical errors.
+    return (mean, torch.clamp(var, min=0.0))
