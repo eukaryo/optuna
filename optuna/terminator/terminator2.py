@@ -299,8 +299,6 @@ class Terminator2(BaseTerminator):
 
         assert len(standarized_score_vals) == len(normalized_params)
 
-        _lambda = prior.DEFAULT_MINIMUM_NOISE_VAR
-
         kernel_params_t2 = gp.fit_kernel_params(  # t-2番目までの観測でkernelをfitする
             X=normalized_params[..., :-2, :],
             Y=standarized_score_vals[:-2],
@@ -423,6 +421,7 @@ class Terminator2(BaseTerminator):
         alg1_delta_r_tilde_t_term2 = theorem1_v * scipy_stats.norm.pdf(theorem1_g)
         alg1_delta_r_tilde_t_term3 = theorem1_v * theorem1_g * scipy_stats.norm.cdf(theorem1_g)
 
+        _lambda = prior.DEFAULT_MINIMUM_NOISE_VAR
         eq4_rhs_term1 = 0.5 * math.log(1.0 + _lambda * sigma_t1_theta_t_squared)
         eq4_rhs_term2 = 0.5 * sigma_t1_theta_t_squared / (sigma_t1_theta_t_squared + _lambda**-1)
         eq4_rhs_term3 = (
