@@ -357,13 +357,13 @@ class Terminator2(BaseTerminator):
             normalized_params[-1, :],
             kernel_params_t1,
         )
-        mu_t2_theta_t1, sigma_t2_theta_t1 = self._compute_gp_posterior(
-            internal_search_space,
-            normalized_params[:-2, :],
-            standarized_score_vals[:-2],
-            normalized_params[-2, :],
-            kernel_params_t2,
-        )
+        # mu_t2_theta_t1, sigma_t2_theta_t1 = self._compute_gp_posterior(
+        #     internal_search_space,
+        #     normalized_params[:-2, :],
+        #     standarized_score_vals[:-2],
+        #     normalized_params[-2, :],
+        #     kernel_params_t2,
+        # )
         mu_t1_theta_t_star, sigma_t1_theta_t_star = self._compute_gp_posterior(
             internal_search_space,
             normalized_params[:-1, :],
@@ -385,7 +385,7 @@ class Terminator2(BaseTerminator):
             theta_t_star,
             kernel_params_t,
         )
-        mu_t1_theta_t1_star, sigma_t1_theta_t1_star = self._compute_gp_posterior(
+        mu_t1_theta_t1_star, _ = self._compute_gp_posterior(
             internal_search_space,
             normalized_params[:-1, :],
             standarized_score_vals[:-1],
@@ -393,11 +393,9 @@ class Terminator2(BaseTerminator):
             kernel_params_t1,
         )
         sigma_t1_theta_t_squared = sigma_t1_theta_t**2
-        sigma_t2_theta_t1_squared = sigma_t2_theta_t1**2
 
         sigma_t1_theta_t_star_squared = sigma_t1_theta_t_star**2
         sigma_t_theta_t_star_squared = sigma_t_theta_t_star**2
-        sigma_t1_theta_t1_star_squared = sigma_t1_theta_t1_star**2
 
         y_t = standarized_score_vals[-1]
         kappa_t1 = _compute_kappa(
@@ -517,7 +515,7 @@ def _posterior(
 
 def _compute_kappa(
     kernel_params: KernelParamsTensor,
-    gp_search_space: gp_search_space,
+    _gp_search_space: gp_search_space,
     normalized_top_n_params: np.ndarray,
     standarized_top_n_values: np.ndarray,
     beta: float,
@@ -525,7 +523,7 @@ def _compute_kappa(
     rng: np.random.RandomState | None = None,
 ) -> float:
     """
-    Compute min(ucb) over the trials minus min(lcb) over the entire search space.
+    Compute min(ucb) over the all trials minus min(lcb) over the entire search space.
     """
 
     # 疑問: Theorem1の、 "Pick \delta \in (0,1)"って何？ "UCB_{\delta}"みたいな下付き文字に使われてるけど
@@ -534,13 +532,13 @@ def _compute_kappa(
     ucb_acqf_params = acqf.create_acqf_params(
         acqf_type=acqf.AcquisitionFunctionType.UCB,
         kernel_params=kernel_params,
-        search_space=gp_search_space,
+        search_space=_gp_search_space,
         X=normalized_top_n_params,
         Y=standarized_top_n_values,
         beta=beta,
     )
-    # UCB over the top trials.
-    standardized_ucb_value = np.max(
+    # UCB over the all trials.
+    standardized_ucb_value = np.min(
         acqf.eval_acqf_no_grad(ucb_acqf_params, normalized_top_n_params)
     )
 
@@ -548,17 +546,18 @@ def _compute_kappa(
     lcb_acqf_params = acqf.create_acqf_params(
         acqf_type=acqf.AcquisitionFunctionType.LCB,
         kernel_params=kernel_params,
-        search_space=gp_search_space,
+        search_space=_gp_search_space,
         X=normalized_top_n_params,
         Y=standarized_top_n_values,
         beta=beta,
     )
+
+    xs = gp_search_space.sample_normalized_params(optimize_n_samples, lcb_acqf_params.search_space, rng=rng)
+
     # LCB over the search space.
     standardized_lcb_value = min(
-        acqf.eval_acqf_no_grad(lcb_acqf_params, normalized_top_n_params).max(),
-        optim_sample.optimize_acqf_sample(lcb_acqf_params, n_samples=optimize_n_samples, rng=rng)[
-            1
-        ],
+        acqf.eval_acqf_no_grad(lcb_acqf_params, normalized_top_n_params).min(),
+        acqf.eval_acqf_no_grad(lcb_acqf_params, xs).min()
     )
 
     return standardized_ucb_value - standardized_lcb_value  # standardized regret bound
