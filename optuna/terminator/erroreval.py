@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import sys
 from typing import cast
 
 import numpy as np
@@ -10,7 +11,7 @@ from optuna.study import StudyDirection
 from optuna.trial import FrozenTrial
 from optuna.trial import Trial
 from optuna.trial._state import TrialState
-
+from optuna.terminator.improvement.evaluator import BaseImprovementEvaluator
 
 _CROSS_VALIDATION_SCORES_KEY = "terminator:cv_scores"
 
@@ -24,6 +25,37 @@ class BaseErrorEvaluator(metaclass=abc.ABCMeta):
         trials: list[FrozenTrial],
         study_direction: StudyDirection,
     ) -> float:
+        pass
+
+    def before_evaluate(
+        self,
+        trials: list[FrozenTrial],
+        study_direction: StudyDirection,
+        paired_improvement_evaluator: BaseImprovementEvaluator,
+    ) -> None:
+        """ErrorEvaluator pre-processing.
+
+        This method is called before the error-evaluator is called.
+        More precisely, this method is called just before
+        the :func:`~optuna.terminator.BaseTerminator.should_terminate` call.
+        In other words, it is responsible for pre-processing that should be done
+        before each error-evaluation.
+
+        .. note::
+            Added in v4.0.0 as an experimental feature. The interface may change in newer versions
+            without prior notice. See https://github.com/optuna/optuna/releases/tag/v4.0.0.
+
+        Args:
+            trials:
+                A list of trials to consider.
+
+            study_direction:
+                The direction of the study.
+
+            paired_improvement_evaluator:
+                The ``improvement_evaluator`` instance which is set with this ``error_evaluator``.
+
+        """
         pass
 
 
@@ -127,3 +159,70 @@ class StaticErrorEvaluator(BaseErrorEvaluator):
         study_direction: StudyDirection,
     ) -> float:
         return self._constant
+
+
+@experimental_class("4.0.0")
+class RatioToInitialMedianErrorEvaluator(BaseErrorEvaluator):
+    """An error evaluator that returns the ratio to initial median.
+
+
+    Args:
+        warm_up_trials:
+            A parameter specifies the number of initial trials to be discarded before
+            the calculation of median.
+
+        n_initial_trials:
+            A parameter specifies the number of initial trials considered in the calculation of
+            median.
+
+        threshold_ratio:
+            A parameter specifies the ratio between the threshold and initial median.
+
+    """
+
+    def __init__(self,
+        warm_up_trials: int = 10,
+        n_initial_trials:int = 20,
+        threshold_ratio: float = 0.01,
+    ) -> None:
+        if warm_up_trials < 0:
+            raise ValueError("`warm_up_trials` is expected to be a non-negative integer.")
+        if n_initial_trials <= 0:
+            raise ValueError("`n_initial_trials` is expected to be a positive integer.")
+        if threshold_ratio <= 0.0 or not np.isfinite(threshold_ratio):
+            raise ValueError("`threshold_ratio_to_initial_median` is expected to be a positive.")
+
+        self._warm_up_trials = warm_up_trials
+        self._n_initial_trials = n_initial_trials
+        self._threshold_ratio = threshold_ratio
+        self._threshold = None
+
+    def before_evaluate(
+        self,
+        trials: list[FrozenTrial],
+        study_direction: StudyDirection,
+        paired_improvement_evaluator: BaseImprovementEvaluator,
+    ) -> None:
+
+        if self._threshold == None:
+            trials = [trial for trial in trials if trial.state == TrialState.COMPLETE]
+            if self._warm_up_trials + self._n_initial_trials < len(trials):
+                return
+            trials.sort(key=lambda trial: trial.number)
+            criteria = []
+            for i in range(self._warm_up_trials, self._warm_up_trials + self._n_initial_trials):
+                criteria.append(paired_improvement_evaluator.evaluate(trials[self._warm_up_trials:self._warm_up_trials+i+1], study_direction))
+            criteria.sort()
+            self._threshold = criteria[len(criteria) // 2]
+            self._threshold *= self._threshold_ratio
+
+    def evaluate(
+        self,
+        trials: list[FrozenTrial],
+        study_direction: StudyDirection,
+    ) -> float:
+
+        if self._threshold == None:
+            return -sys.float_info.max  # Do not terminate.
+
+        return self._threshold
