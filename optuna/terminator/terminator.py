@@ -128,6 +128,11 @@ class Terminator(BaseTerminator):
             study_direction=study.direction,
         )
 
+        self._error_evaluator.before_evaluate(
+            trials=study.trials,
+            study_direction=study.direction,
+            paired_improvement_evaluator=self._improvement_evaluator
+        )
         error = self._error_evaluator.evaluate(
             trials=study.trials, study_direction=study.direction
         )
